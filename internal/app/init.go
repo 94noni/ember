@@ -17,6 +17,7 @@ import (
 func newInitCmd(cfg *config) *cobra.Command {
 	var yes bool
 	var quiet bool
+	var debug bool
 
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -29,7 +30,8 @@ admin API to read and optionally write configuration.`,
 		Example: `  ember init
   ember init --addr https://prod:2019 --ca-cert ca.pem
   ember init -y
-  ember init -yq`,
+  ember init -yq
+  ember init --debug`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -47,12 +49,13 @@ admin API to read and optionally write configuration.`,
 			if quiet {
 				w = io.Discard
 			}
-			return runInit(ctx, w, os.Stdin, f, cfg.addr, yes)
+			return runInit(ctx, w, os.Stdin, f, cfg.addr, yes, debug)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompts")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress output (errors still reported via exit code)")
+	cmd.Flags().BoolVar(&debug, "debug", false, "Enable Caddy debug directive globally")
 
 	return cmd
 }
@@ -63,7 +66,7 @@ type initCheck struct {
 	detail string
 }
 
-func runInit(ctx context.Context, w io.Writer, r io.Reader, f *fetcher.HTTPFetcher, addr string, autoYes bool) error {
+func runInit(ctx context.Context, w io.Writer, r io.Reader, f *fetcher.HTTPFetcher, addr string, autoYes bool, forceDebug bool) error {
 	fmt.Fprintf(w, "Checking Caddy at %s...\n", addr)
 
 	if err := f.CheckAdminAPI(ctx); err != nil {
@@ -96,6 +99,28 @@ func runInit(ctx context.Context, w io.Writer, r io.Reader, f *fetcher.HTTPFetch
 				return fmt.Errorf("could not enable metrics: %w", err)
 			}
 			printCheck(w, initCheck{label: "HTTP metrics enabled", ok: true})
+		}
+	}
+
+	debugEnabled, err := f.CheckDebugEnabled(ctx)
+	if err != nil {
+		printCheck(w, initCheck{label: "Debug check failed", ok: false, detail: err.Error()})
+	} else if debugEnabled {
+		printCheck(w, initCheck{label: "Debug directive enabled", ok: true})
+	} else if forceDebug {
+		if err := f.SetDebug(ctx, true); err != nil {
+			printCheck(w, initCheck{label: "Failed to enable debug", ok: false, detail: err.Error()})
+			return fmt.Errorf("could not enable debug: %w", err)
+		}
+		printCheck(w, initCheck{label: "Debug directive enabled", ok: true})
+	} else {
+		printCheck(w, initCheck{label: "Debug directive not enabled", ok: false})
+		if promptYesNo(w, r, "\nEnable Caddy debug directive via the admin API?", autoYes) {
+			if err := f.SetDebug(ctx, true); err != nil {
+				printCheck(w, initCheck{label: "Failed to enable debug", ok: false, detail: err.Error()})
+				return fmt.Errorf("could not enable debug: %w", err)
+			}
+			printCheck(w, initCheck{label: "Debug directive enabled", ok: true})
 		}
 	}
 

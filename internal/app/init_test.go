@@ -17,12 +17,14 @@ import (
 
 type initServer struct {
 	metricsEnabled bool
+	debugEnabled   bool
 	hasFrankenPHP  bool
 	hasHTTPMetrics bool
 	wildcardHost   bool
 	servers        map[string]any
 	fpConfig       *fetcher.FrankenPHPConfig
 	enabledMetrics bool
+	enabledDebug   bool
 }
 
 func newInitTestServer(s *initServer) *httptest.Server {
@@ -50,6 +52,23 @@ func newInitTestServer(s *initServer) *httptest.Server {
 
 		case r.URL.Path == "/config/apps/http/metrics" && r.Method == http.MethodPost:
 			s.enabledMetrics = true
+			w.WriteHeader(200)
+
+		case r.URL.Path == "/config/apps/http/debug" && r.Method == http.MethodGet:
+			if s.debugEnabled || s.enabledDebug {
+				w.WriteHeader(200)
+				json.NewEncoder(w).Encode(map[string]any{})
+			} else {
+				w.WriteHeader(200)
+				w.Write([]byte("null"))
+			}
+
+		case r.URL.Path == "/config/apps/http/debug" && r.Method == http.MethodPost:
+			s.enabledDebug = true
+			w.WriteHeader(200)
+
+		case r.URL.Path == "/config/apps/http/debug" && r.Method == http.MethodDelete:
+			s.enabledDebug = false
 			w.WriteHeader(200)
 
 		case r.URL.Path == "/frankenphp/threads" && r.Method == http.MethodGet:
@@ -90,6 +109,7 @@ func newInitTestServer(s *initServer) *httptest.Server {
 func TestRunInit_FullSetup(t *testing.T) {
 	is := &initServer{
 		metricsEnabled: true,
+		debugEnabled:   true,
 		hasFrankenPHP:  true,
 		hasHTTPMetrics: true,
 		servers:        map[string]any{"srv0": nil, "srv1": nil},
@@ -105,11 +125,12 @@ func TestRunInit_FullSetup(t *testing.T) {
 
 	f := fetcher.NewHTTPFetcher(srv.URL, 0)
 	var buf bytes.Buffer
-	err := runInit(context.Background(), &buf, strings.NewReader(""), f, srv.URL, true)
+	err := runInit(context.Background(), &buf, strings.NewReader(""), f, srv.URL, true, false)
 
 	require.NoError(t, err)
 	out := buf.String()
 	assert.Contains(t, out, "Admin API reachable")
+	assert.Contains(t, out, "Debug directive enabled")
 	assert.Contains(t, out, "2 HTTP server(s)")
 	assert.Contains(t, out, "HTTP metrics enabled")
 	assert.Contains(t, out, "FrankenPHP detected")
@@ -121,6 +142,7 @@ func TestRunInit_FullSetup(t *testing.T) {
 func TestRunInit_CaddyOnly(t *testing.T) {
 	is := &initServer{
 		metricsEnabled: true,
+		debugEnabled:   true,
 		hasHTTPMetrics: true,
 		servers:        map[string]any{"main": nil},
 	}
@@ -129,11 +151,12 @@ func TestRunInit_CaddyOnly(t *testing.T) {
 
 	f := fetcher.NewHTTPFetcher(srv.URL, 0)
 	var buf bytes.Buffer
-	err := runInit(context.Background(), &buf, strings.NewReader(""), f, srv.URL, true)
+	err := runInit(context.Background(), &buf, strings.NewReader(""), f, srv.URL, true, false)
 
 	require.NoError(t, err)
 	out := buf.String()
 	assert.Contains(t, out, "Admin API reachable")
+	assert.Contains(t, out, "Debug directive enabled")
 	assert.Contains(t, out, "FrankenPHP not detected")
 	assert.Contains(t, out, "Ember is ready")
 }
@@ -141,6 +164,7 @@ func TestRunInit_CaddyOnly(t *testing.T) {
 func TestRunInit_EnablesMetrics(t *testing.T) {
 	is := &initServer{
 		metricsEnabled: false,
+		debugEnabled:   true,
 		servers:        map[string]any{"srv0": nil},
 	}
 	srv := newInitTestServer(is)
@@ -148,7 +172,7 @@ func TestRunInit_EnablesMetrics(t *testing.T) {
 
 	f := fetcher.NewHTTPFetcher(srv.URL, 0)
 	var buf bytes.Buffer
-	err := runInit(context.Background(), &buf, strings.NewReader("y\n"), f, srv.URL, false)
+	err := runInit(context.Background(), &buf, strings.NewReader("y\n"), f, srv.URL, false, false)
 
 	require.NoError(t, err)
 	out := buf.String()
@@ -159,31 +183,69 @@ func TestRunInit_EnablesMetrics(t *testing.T) {
 }
 
 func TestRunInit_EnablesMetricsAutoYes(t *testing.T) {
-	is := &initServer{metricsEnabled: false}
+	is := &initServer{metricsEnabled: false, debugEnabled: true}
 	srv := newInitTestServer(is)
 	defer srv.Close()
 
 	f := fetcher.NewHTTPFetcher(srv.URL, 0)
 	var buf bytes.Buffer
-	err := runInit(context.Background(), &buf, strings.NewReader(""), f, srv.URL, true)
+	err := runInit(context.Background(), &buf, strings.NewReader(""), f, srv.URL, true, false)
 
 	require.NoError(t, err)
 	assert.True(t, is.enabledMetrics)
 }
 
 func TestRunInit_SkipsMetricsOnNo(t *testing.T) {
-	is := &initServer{metricsEnabled: false}
+	is := &initServer{metricsEnabled: false, debugEnabled: true}
 	srv := newInitTestServer(is)
 	defer srv.Close()
 
 	f := fetcher.NewHTTPFetcher(srv.URL, 0)
 	var buf bytes.Buffer
-	err := runInit(context.Background(), &buf, strings.NewReader("n\n"), f, srv.URL, false)
+	err := runInit(context.Background(), &buf, strings.NewReader("n\n"), f, srv.URL, false, false)
 
 	require.NoError(t, err)
 	assert.False(t, is.enabledMetrics)
 	assert.Contains(t, buf.String(), "Skipped")
 	assert.Contains(t, buf.String(), "{ metrics }")
+}
+
+func TestRunInit_EnablesDebug(t *testing.T) {
+	is := &initServer{
+		metricsEnabled: true,
+		debugEnabled:   false,
+		servers:        map[string]any{"srv0": nil},
+	}
+	srv := newInitTestServer(is)
+	defer srv.Close()
+
+	f := fetcher.NewHTTPFetcher(srv.URL, 0)
+	var buf bytes.Buffer
+	err := runInit(context.Background(), &buf, strings.NewReader("y\n"), f, srv.URL, false, false)
+
+	require.NoError(t, err)
+	out := buf.String()
+	assert.Contains(t, out, "Debug directive not enabled")
+	assert.Contains(t, out, "Enable Caddy debug directive")
+	assert.Contains(t, out, "Debug directive enabled")
+	assert.True(t, is.enabledDebug)
+}
+
+func TestRunInit_EnablesDebugForce(t *testing.T) {
+	is := &initServer{
+		metricsEnabled: true,
+		debugEnabled:   false,
+		servers:        map[string]any{"srv0": nil},
+	}
+	srv := newInitTestServer(is)
+	defer srv.Close()
+
+	f := fetcher.NewHTTPFetcher(srv.URL, 0)
+	var buf bytes.Buffer
+	err := runInit(context.Background(), &buf, strings.NewReader(""), f, srv.URL, false, true)
+
+	require.NoError(t, err)
+	assert.True(t, is.enabledDebug)
 }
 
 func TestRunInit_Unreachable(t *testing.T) {
@@ -194,7 +256,7 @@ func TestRunInit_Unreachable(t *testing.T) {
 
 	f := fetcher.NewHTTPFetcher(srv.URL, 0)
 	var buf bytes.Buffer
-	err := runInit(context.Background(), &buf, strings.NewReader(""), f, srv.URL, true)
+	err := runInit(context.Background(), &buf, strings.NewReader(""), f, srv.URL, true, false)
 
 	require.Error(t, err)
 	assert.Contains(t, buf.String(), "✗")
@@ -242,6 +304,7 @@ func TestRun_InitHelp(t *testing.T) {
 	out := buf.String()
 	assert.Contains(t, out, "admin API")
 	assert.Contains(t, out, "--yes")
+	assert.Contains(t, out, "--debug")
 }
 
 func TestRun_InitInheritsAddr(t *testing.T) {
@@ -270,13 +333,13 @@ func TestRun_InitQuietFlag(t *testing.T) {
 }
 
 func TestRunInit_WildcardHostWarning(t *testing.T) {
-	is := &initServer{metricsEnabled: true, hasHTTPMetrics: true, wildcardHost: true, servers: map[string]any{"srv0": nil}}
+	is := &initServer{metricsEnabled: true, debugEnabled: true, hasHTTPMetrics: true, wildcardHost: true, servers: map[string]any{"srv0": nil}}
 	srv := newInitTestServer(is)
 	defer srv.Close()
 
 	f := fetcher.NewHTTPFetcher(srv.URL, 0)
 	var buf bytes.Buffer
-	err := runInit(context.Background(), &buf, strings.NewReader(""), f, srv.URL, true)
+	err := runInit(context.Background(), &buf, strings.NewReader(""), f, srv.URL, true, false)
 
 	require.NoError(t, err)
 	assert.Contains(t, buf.String(), "All traffic grouped under")
@@ -284,13 +347,13 @@ func TestRunInit_WildcardHostWarning(t *testing.T) {
 }
 
 func TestRunInit_NoWildcardWarningWithRealHosts(t *testing.T) {
-	is := &initServer{metricsEnabled: true, hasHTTPMetrics: true, servers: map[string]any{"srv0": nil}}
+	is := &initServer{metricsEnabled: true, debugEnabled: true, hasHTTPMetrics: true, servers: map[string]any{"srv0": nil}}
 	srv := newInitTestServer(is)
 	defer srv.Close()
 
 	f := fetcher.NewHTTPFetcher(srv.URL, 0)
 	var buf bytes.Buffer
-	err := runInit(context.Background(), &buf, strings.NewReader(""), f, srv.URL, true)
+	err := runInit(context.Background(), &buf, strings.NewReader(""), f, srv.URL, true, false)
 
 	require.NoError(t, err)
 	assert.NotContains(t, buf.String(), "All traffic grouped under")
@@ -306,12 +369,12 @@ func TestHasWildcardHost(t *testing.T) {
 }
 
 func TestRunInit_Quiet(t *testing.T) {
-	is := &initServer{metricsEnabled: true, hasFrankenPHP: false, hasHTTPMetrics: true}
+	is := &initServer{metricsEnabled: true, debugEnabled: true, hasFrankenPHP: false, hasHTTPMetrics: true}
 	srv := newInitTestServer(is)
 	defer srv.Close()
 
 	f := fetcher.NewHTTPFetcher(srv.URL, 0)
-	err := runInit(context.Background(), io.Discard, strings.NewReader(""), f, srv.URL, false)
+	err := runInit(context.Background(), io.Discard, strings.NewReader(""), f, srv.URL, false, false)
 
 	require.NoError(t, err)
 }

@@ -545,10 +545,19 @@ func (f *HTTPFetcher) CheckAdminAPI(ctx context.Context) error {
 
 // CheckMetricsEnabled returns true if the HTTP metrics directive is configured.
 func (f *HTTPFetcher) CheckMetricsEnabled(ctx context.Context) (bool, error) {
+	return f.checkConfig(ctx, "/config/apps/http/metrics")
+}
+
+// CheckDebugEnabled returns true if the global debug directive is enabled.
+func (f *HTTPFetcher) CheckDebugEnabled(ctx context.Context) (bool, error) {
+	return f.checkConfig(ctx, "/config/logging/logs/default/level")
+}
+
+func (f *HTTPFetcher) checkConfig(ctx context.Context, path string) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.baseURL+"/config/apps/http/metrics", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.baseURL+path, nil)
 	if err != nil {
 		return false, err
 	}
@@ -565,12 +574,15 @@ func (f *HTTPFetcher) CheckMetricsEnabled(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	// /config/apps/http/metrics returns "null" when not set, or a JSON object when set
 	var raw json.RawMessage
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return false, nil
 	}
-	return string(raw) != "null", nil
+	val := string(raw)
+	if val == "null" {
+		return false, nil
+	}
+	return true, nil
 }
 
 // EnableMetrics activates the HTTP metrics directive via the admin API.
@@ -594,6 +606,43 @@ func (f *HTTPFetcher) EnableMetrics(ctx context.Context) error {
 	}()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("enable metrics: HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// SetDebug enables or disables the global debug directive via the admin API.
+func (f *HTTPFetcher) SetDebug(ctx context.Context, enabled bool) error {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+
+	var body io.Reader
+	if enabled {
+		body = strings.NewReader("DEBUG")
+	} else {
+		body = strings.NewReader("INFO")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.baseURL+"/config/logging/logs/level", body)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	if enabled {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := f.httpClient.Do(req)
+	fmt.Println(resp)
+	if err != nil {
+		return fmt.Errorf("set debug: %w", err)
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("set debug: HTTP %d", resp.StatusCode)
 	}
 	return nil
 }
